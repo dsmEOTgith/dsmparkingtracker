@@ -2,6 +2,7 @@ import io
 import re
 import sqlite3
 import statistics
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -192,7 +193,7 @@ def require_login():
     if st.session_state.get("authenticated"):
         return
 
-    st.title("🚗 Church Parking Violation Tracker🛻")
+    st.title("🚗 Church Parking Violation Tracker")
     st.subheader("Authorized personnel login")
     st.caption(
         "Parking records and photos are restricted to authorized church personnel."
@@ -697,16 +698,35 @@ class SupabaseBackend:
             f"{plate}_{uuid.uuid4().hex[:10]}.jpg"
         )
 
-        self.client.storage.from_(self.bucket).upload(
-            path=path,
-            file=io.BytesIO(photo_bytes),
-            file_options={
-                "content-type": "image/jpeg",
-                "cache-control": "3600",
-                "upsert": "false",
-            },
-        )
-        return path
+        # The storage3 client used by Streamlit Cloud may internally call
+        # open(file, "rb"), so give it a real temporary filesystem path
+        # rather than an in-memory BytesIO object.
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                suffix=".jpg",
+                delete=False,
+            ) as temp_file:
+                temp_file.write(photo_bytes)
+                temp_path = temp_file.name
+
+            self.client.storage.from_(self.bucket).upload(
+                path=path,
+                file=temp_path,
+                file_options={
+                    "content-type": "image/jpeg",
+                    "cache-control": "3600",
+                    "upsert": "false",
+                },
+            )
+            return path
+        finally:
+            if temp_path:
+                try:
+                    Path(temp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def save_violation(
         self,
@@ -1354,9 +1374,9 @@ with st.sidebar:
         logout_user()
         st.rerun()
 
-st.title("🚗 Church Parking Violation Tracker 🛻")
+st.title("🚗 Church Parking Violation Tracker")
 st.caption(
-    "Version 1.0 — persistent database, private cloud photo storage, "
+    "Version 1.0.1 — persistent database, private cloud photo storage, "
     "secure login, and automatic plate recognition"
 )
 
