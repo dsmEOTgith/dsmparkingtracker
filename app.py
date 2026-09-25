@@ -192,7 +192,7 @@ def require_login():
     if st.session_state.get("authenticated"):
         return
 
-    st.title("🚗 Church Parking Violation Tracker")
+    st.title("🚗 Church Parking Violation Tracker🛻")
     st.subheader("Authorized personnel login")
     st.caption(
         "Parking records and photos are restricted to authorized church personnel."
