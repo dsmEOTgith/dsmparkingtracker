@@ -100,16 +100,15 @@ for local_row in rows:
                     f"{source.name}"
                 )
 
-                with source.open("rb") as photo_file:
-                    client.storage.from_(bucket).upload(
-                        path=uploaded_path,
-                        file=photo_file,
-                        file_options={
-                            "content-type": "image/jpeg",
-                            "cache-control": "3600",
-                            "upsert": "false",
-                        },
-                    )
+                client.storage.from_(bucket).upload(
+                    path=uploaded_path,
+                    file=str(source),
+                    file_options={
+                        "content-type": "image/jpeg",
+                        "cache-control": "3600",
+                        "upsert": "false",
+                    },
+                )
 
                 photo_path = uploaded_path
 
