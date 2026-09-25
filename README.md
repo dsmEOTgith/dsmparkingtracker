@@ -1,6 +1,22 @@
-# Church Parking Violation Tracker — v1.0
+# Church Parking Violation Tracker — v1.0.1
 
-Version 1.0 adds **persistent production storage**.
+Version 1.0.1 adds **persistent production storage** and includes a Streamlit Cloud photo-upload compatibility hotfix.
+
+
+## v1.0.1 photo upload hotfix
+
+v1.0 could fail on Streamlit Cloud with:
+
+`TypeError: expected str, bytes or os.PathLike object, not BytesIO`
+
+The installed `storage3` client was attempting to open the supplied upload
+object as a filesystem path. v1.0.1 writes the already-normalized JPEG to a
+short-lived temporary `.jpg` file, uploads that filepath to the private
+Supabase bucket, and deletes the temporary file immediately afterward.
+
+The Supabase database schema and SQL functions are unchanged.
+
+**You do not need to rerun `supabase_setup.sql`.**
 
 ## Architecture
 
