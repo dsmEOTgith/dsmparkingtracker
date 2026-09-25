@@ -1354,7 +1354,7 @@ with st.sidebar:
         logout_user()
         st.rerun()
 
-st.title("🚗 Church Parking Violation Tracker")
+st.title("🚗 Church Parking Violation Tracker 🛻")
 st.caption(
     "Version 1.0 — persistent database, private cloud photo storage, "
     "secure login, and automatic plate recognition"
