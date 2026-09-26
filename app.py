@@ -383,6 +383,64 @@ class LocalBackend:
             ).fetchone()
         return dict(row) if row else None
 
+    def plate_options(self, limit=1000):
+        with local_db_conn() as connection:
+            rows = connection.execute(
+                """
+                SELECT plate_number, MAX(recorded_at) AS last_seen
+                FROM violations
+                GROUP BY plate_number
+                ORDER BY MAX(recorded_at) DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [row["plate_number"] for row in rows]
+
+    def delete_photo(self, record_id):
+        record = self.get_record(record_id)
+        if not record:
+            raise RuntimeError("Record not found.")
+
+        photo_path = record.get("photo_path")
+        if not photo_path:
+            return False
+
+        path = BASE / photo_path
+        if path.exists():
+            path.unlink()
+
+        with local_db_conn() as connection:
+            connection.execute(
+                """
+                UPDATE violations
+                SET photo_path=NULL, photo_source=NULL
+                WHERE id=?
+                """,
+                (int(record_id),),
+            )
+            connection.commit()
+        return True
+
+    def delete_record(self, record_id):
+        record = self.get_record(record_id)
+        if not record:
+            raise RuntimeError("Record not found.")
+
+        photo_path = record.get("photo_path")
+        if photo_path:
+            path = BASE / photo_path
+            if path.exists():
+                path.unlink()
+
+        with local_db_conn() as connection:
+            connection.execute(
+                "DELETE FROM violations WHERE id=?",
+                (int(record_id),),
+            )
+            connection.commit()
+        return True
+
     def duplicate(self, plate, violation, location, violation_datetime):
         start = violation_datetime - timedelta(minutes=10)
         end = violation_datetime + timedelta(minutes=10)
@@ -670,6 +728,73 @@ class SupabaseBackend:
         )
         rows = response_data(response) or []
         return rows[0] if rows else None
+
+    def plate_options(self, limit=1000):
+        # Fetch only lightweight plate/date fields, newest first, then deduplicate.
+        # This keeps Record Review responsive without loading histories/photos for
+        # every vehicle.
+        fetch_limit = min(max(int(limit) * 5, 1000), 5000)
+        response = (
+            self.client.table("violations")
+            .select("plate_number,recorded_at")
+            .order("recorded_at", desc=True)
+            .limit(fetch_limit)
+            .execute()
+        )
+
+        seen = set()
+        plates = []
+        for row in response_data(response) or []:
+            plate = norm_plate(row.get("plate_number", ""))
+            if plate and plate not in seen:
+                seen.add(plate)
+                plates.append(plate)
+                if len(plates) >= int(limit):
+                    break
+        return plates
+
+    def delete_photo(self, record_id):
+        record = self.get_record(record_id)
+        if not record:
+            raise RuntimeError("Record not found.")
+
+        photo_path = record.get("photo_path")
+        if not photo_path:
+            return False
+
+        # Remove the private Storage object first. Only clear the database path
+        # after Storage confirms the operation without raising an error.
+        self.client.storage.from_(self.bucket).remove([photo_path])
+
+        (
+            self.client.table("violations")
+            .update({"photo_path": None, "photo_source": None})
+            .eq("id", int(record_id))
+            .execute()
+        )
+
+        st.cache_data.clear()
+        return True
+
+    def delete_record(self, record_id):
+        record = self.get_record(record_id)
+        if not record:
+            raise RuntimeError("Record not found.")
+
+        photo_path = record.get("photo_path")
+        if photo_path:
+            # Prevent an orphaned private photo: remove Storage first, then row.
+            self.client.storage.from_(self.bucket).remove([photo_path])
+
+        (
+            self.client.table("violations")
+            .delete()
+            .eq("id", int(record_id))
+            .execute()
+        )
+
+        st.cache_data.clear()
+        return True
 
     def duplicate(self, plate, violation, location, violation_datetime):
         start = violation_datetime - timedelta(minutes=10)
@@ -1376,7 +1501,7 @@ with st.sidebar:
 
 st.title("🚗 Church Parking Violation Tracker")
 st.caption(
-    "Version 1.0.1 — persistent database, private cloud photo storage, "
+    "Version 1.0.2 — persistent storage, cleaner ALPR, and admin record management, "
     "secure login, and automatic plate recognition"
 )
 
@@ -1511,8 +1636,7 @@ with record_tab:
         if candidates:
             best = candidates[0]
             st.success(
-                f"Detected plate: **{best['plate']}** "
-                f"(OCR confidence {best['ocr_confidence']:.0%})"
+                f"Detected plate: **{best['plate']}**"
             )
 
             options = [
@@ -1538,26 +1662,27 @@ with record_tab:
                 "Try a closer/clearer photo or type the plate manually."
             )
 
-        with st.expander(
-            "ALPR diagnostic results"
-        ):
-            diagnostics = (
-                st.session_state.get(
-                    "alpr_diagnostics",
-                    [],
+        if user["role"] == "admin":
+            with st.expander(
+                "ALPR Diagnostic / Troubleshooting (Admin only)"
+            ):
+                diagnostics = (
+                    st.session_state.get(
+                        "alpr_diagnostics",
+                        [],
+                    )
                 )
-            )
 
-            if diagnostics:
-                st.dataframe(
-                    pd.DataFrame(diagnostics),
-                    width="stretch",
-                    hide_index=True,
-                )
-            else:
-                st.write(
-                    "No plate detections were returned."
-                )
+                if diagnostics:
+                    st.dataframe(
+                        pd.DataFrame(diagnostics),
+                        width="stretch",
+                        hide_index=True,
+                    )
+                else:
+                    st.write(
+                        "No plate detections were returned."
+                    )
 
     st.markdown(
         "#### Violation Information"
@@ -2001,90 +2126,203 @@ with admin_tab:
             "Administrator access is required for Record Review."
         )
     else:
-        st.subheader(
-            "Review / Dismiss a Record"
+        st.subheader("Record Review & Administration")
+        st.caption(
+            "Select a license plate, then choose the specific violation record. "
+            "Use Dismiss for normal corrections. Permanent deletion is intended "
+            "only for records that truly should not remain in the system."
         )
 
-        record_id = st.number_input(
-            "Record ID",
-            min_value=1,
-            step=1,
-            value=1,
+        try:
+            plate_options = backend.plate_options(limit=1000)
+        except Exception as exc:
+            plate_options = []
+            st.error("License plate list could not be loaded.")
+            with st.expander("Technical detail"):
+                st.exception(exc)
+
+        selected_plate = st.selectbox(
+            "License Plate",
+            options=plate_options,
+            index=None,
+            placeholder="Type or select a license plate...",
+            key="admin_review_plate",
         )
 
-        if st.button(
-            "Find Record"
-        ):
-            st.session_state[
-                "review_record"
-            ] = backend.get_record(
-                record_id
-            )
+        record = None
 
-        record = st.session_state.get(
-            "review_record"
-        )
+        if selected_plate:
+            review_rows = backend.history(selected_plate)
+
+            if not review_rows:
+                st.info("No records were found for this license plate.")
+            else:
+                record_by_label = {}
+                record_labels = []
+
+                for row in review_rows:
+                    label = (
+                        f"{display_datetime(row.get('recorded_at'))}  •  "
+                        f"{row.get('violation_type', '')}  •  "
+                        f"{row.get('warning_label', '')}  •  "
+                        f"{row.get('status', '')}  •  Record #{row.get('id')}"
+                    )
+                    record_labels.append(label)
+                    record_by_label[label] = row
+
+                previous_record_label = st.session_state.get(
+                    "admin_review_record_label"
+                )
+                if previous_record_label not in record_labels:
+                    st.session_state.pop("admin_review_record_label", None)
+
+                selected_record_label = st.selectbox(
+                    "Violation Record",
+                    options=record_labels,
+                    key="admin_review_record_label",
+                )
+
+                record = record_by_label.get(selected_record_label)
 
         if record:
-            display_record = dict(record)
-            display_record["recorded_at"] = display_datetime(
-                display_record.get(
-                    "recorded_at"
-                )
-            )
-            if display_record.get("dismissed_at"):
-                display_record["dismissed_at"] = display_datetime(
-                    display_record["dismissed_at"]
-                )
+            st.markdown("#### Selected Record")
 
-            st.write(
-                display_record
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Record ID", record.get("id", ""))
+            c2.metric("Plate", record.get("plate_number", ""))
+            c3.metric("Status", record.get("status", ""))
+            c4.metric("Warning", record.get("warning_label", ""))
+
+            detail_rows = {
+                "Violation Date / Time": display_datetime(record.get("recorded_at")),
+                "Violation": record.get("violation_type", ""),
+                "Location": record.get("location", ""),
+                "Warning Given By": record.get("warned_by", ""),
+                "Entered By": record.get("entered_by", ""),
+                "State / Jurisdiction": record.get("state", ""),
+                "Notes": record.get("notes", "") or "",
+            }
+
+            st.dataframe(
+                pd.DataFrame(
+                    [{"Field": key, "Value": value} for key, value in detail_rows.items()]
+                ),
+                width="stretch",
+                hide_index=True,
             )
 
-            if record.get(
-                "photo_path"
-            ):
-                with st.expander(
-                    "View violation photo"
-                ):
-                    show_photo(
-                        backend,
-                        record,
-                    )
+            if record.get("photo_path"):
+                with st.expander("View violation photo", expanded=True):
+                    show_photo(backend, record)
+            else:
+                st.info("This record does not currently have a stored photo.")
+
+            st.markdown("#### Record Actions")
 
             if record.get("status") == "Active":
-                dismiss_confirmed = (
-                    st.checkbox(
-                        "I confirm this record should be dismissed "
-                        "and no longer count toward warnings."
-                    )
+                dismiss_confirmed = st.checkbox(
+                    "I confirm this record should be dismissed and no longer "
+                    "count toward active warning levels.",
+                    key=f"dismiss_confirm_{record['id']}",
                 )
 
                 if st.button(
                     "Dismiss Record",
-                    disabled=(
-                        not dismiss_confirmed
-                    ),
+                    disabled=not dismiss_confirmed,
+                    key=f"dismiss_record_{record['id']}",
                 ):
-                    backend.dismiss(
-                        record["id"],
-                        user["display_name"],
-                    )
-
-                    st.success(
-                        f"Record #{record['id']} was dismissed."
-                    )
-
-                    st.session_state.pop(
-                        "review_record",
-                        None,
-                    )
-                    st.cache_data.clear()
-
+                    try:
+                        backend.dismiss(
+                            record["id"],
+                            user["display_name"],
+                        )
+                        st.cache_data.clear()
+                        st.session_state.pop("admin_review_record_label", None)
+                        st.success(
+                            f"Record #{record['id']} was dismissed. "
+                            "Its history remains available."
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error("The record could not be dismissed.")
+                        with st.expander("Technical detail"):
+                            st.exception(exc)
             else:
                 st.info(
-                    "This record is already dismissed."
+                    "This record is already dismissed and does not count toward "
+                    "active warning levels."
                 )
+
+            if record.get("photo_path"):
+                with st.expander("Photo Storage Management"):
+                    st.write(
+                        "Delete only the stored photo while keeping the violation "
+                        "record, warning history, date, notes, and audit information."
+                    )
+                    photo_delete_confirmed = st.checkbox(
+                        "I understand the photo will be permanently removed but "
+                        "the violation record will remain.",
+                        key=f"photo_delete_confirm_{record['id']}",
+                    )
+
+                    if st.button(
+                        "Delete Photo Only",
+                        disabled=not photo_delete_confirmed,
+                        key=f"delete_photo_{record['id']}",
+                    ):
+                        try:
+                            deleted = backend.delete_photo(record["id"])
+                            if deleted:
+                                st.success(
+                                    "The photo was permanently deleted. "
+                                    "The violation record was preserved."
+                                )
+                            else:
+                                st.info("This record had no stored photo to delete.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as exc:
+                            st.error("The photo could not be deleted.")
+                            with st.expander("Technical detail"):
+                                st.exception(exc)
+
+            with st.expander("Danger Zone — Permanently Delete Record"):
+                st.error(
+                    "Permanent deletion removes this violation from the database. "
+                    "If a photo is attached, the photo is permanently removed too. "
+                    "This changes the active/history record for this vehicle. "
+                    "Use Dismiss instead when you want to preserve an audit trail."
+                )
+
+                expected = f"DELETE {record.get('plate_number', '')}"
+                delete_text = st.text_input(
+                    f"Type `{expected}` to confirm",
+                    key=f"delete_record_text_{record['id']}",
+                )
+
+                delete_enabled = delete_text.strip().upper() == expected.upper()
+
+                if st.button(
+                    "Permanently Delete Record",
+                    type="primary",
+                    disabled=not delete_enabled,
+                    key=f"delete_record_{record['id']}",
+                ):
+                    try:
+                        deleted_id = record["id"]
+                        deleted_plate = record.get("plate_number", "")
+                        backend.delete_record(deleted_id)
+                        st.cache_data.clear()
+                        st.session_state.pop("admin_review_record_label", None)
+                        st.success(
+                            f"Record #{deleted_id} for {deleted_plate} was "
+                            "permanently deleted."
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error("The record could not be permanently deleted.")
+                        with st.expander("Technical detail"):
+                            st.exception(exc)
 
 
 st.divider()
