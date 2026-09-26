@@ -40,11 +40,13 @@ VIOLATIONS = [
 ]
 
 LOCATIONS = [
-    "Main Entrance",
-    "Side Entrance",
-    "Rear Parking Area",
-    "Overflow Parking",
-    "Church Hall Area",
+    "Disabled Parking"
+    "Main Parking Lot",
+    "Main Entrance Parking",
+    "Main Grass Area Parking",
+    "Across Canemont Main",
+    "Across Canemont Grass",
+    "Reserved Parking Area",
     "Other",
 ]
 
