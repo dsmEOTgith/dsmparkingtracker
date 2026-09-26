@@ -193,7 +193,7 @@ def require_login():
     if st.session_state.get("authenticated"):
         return
 
-    st.title("🚗 Church Parking Violation Tracker")
+    st.title("🚗 Church Parking Violation Tracker 🛻")
     st.subheader("Authorized personnel login")
     st.caption(
         "Parking records and photos are restricted to authorized church personnel."
@@ -1499,7 +1499,7 @@ with st.sidebar:
         logout_user()
         st.rerun()
 
-st.title("🚗 Church Parking Violation Tracker")
+st.title("🚗 Church Parking Violation Tracker 🛻")
 st.caption(
     "Version 1.0.2 — persistent storage, cleaner ALPR, and admin record management, "
     "secure login, and automatic plate recognition"
