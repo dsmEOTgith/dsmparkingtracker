@@ -1,7 +1,17 @@
-# Church Parking Violation Tracker — v1.0.1
+# Church Parking Violation Tracker — v1.0.2
 
-Version 1.0.1 adds **persistent production storage** and includes a Streamlit Cloud photo-upload compatibility hotfix.
+Version 1.0.2 keeps the stable persistent-production backend and adds cleaner ALPR presentation plus administrator record/photo management.
 
+
+## v1.0.2 admin and UI cleanup
+
+- ALPR diagnostics are hidden from Parking Volunteers and remain available to Admins only.
+- The ordinary detected-plate message is simplified; confidence/technical details stay in the admin diagnostic expander.
+- Record Review now uses **License Plate → Violation Record** dropdowns instead of a numeric Record ID spinner.
+- Admins can **Delete Photo Only** to free private Storage while preserving the violation history.
+- Admins can **Permanently Delete Record** with typed confirmation. If a photo exists, the photo is deleted first to avoid leaving an orphaned Storage object.
+- **Dismiss Record** remains the preferred action for normal corrections because it preserves the audit history.
+- No Supabase schema change is required. Do **not** rerun `supabase_setup.sql` for this upgrade.
 
 ## v1.0.1 photo upload hotfix
 
